@@ -1,18 +1,20 @@
 use std::pin::Pin;
 
 use foundationdb::api::{FdbApiBuilder, NetworkAutoStop};
-use foundationdb::{Database, Transaction};
+use foundationdb::{Database, RangeOption, Transaction};
 use futures::{Stream, StreamExt};
 use protos::fdb_service_server::FdbService;
 use protos::fdb_service_server::FdbServiceServer;
-use protos::{GetResponse, OperationRequest, OperationResponse};
-use tokio::time::timeout;
-use tonic::codegen::http::StatusCode;
-use tonic::Streaming;
-use tonic::{transport::Server, Request, Response, Status};
+use protos::get_range_response::Pair as GetRangePair;
 use protos::operation_request::Operation as RequestOperation;
 use protos::operation_response::Operation as ResponseOperation;
+use protos::{
+    ClearResponse, CommitResponse, GetRangeResponse, GetResponse, OperationRequest,
+    OperationResponse, SetResponse,
+};
 use std::sync::Arc;
+use tonic::{transport::Server, Response, Status};
+use tracing::debug;
 
 pub struct Client {
     pub db: Database,
@@ -35,6 +37,7 @@ impl Client {
     }
 
     pub async fn begin_tx(&self) -> Result<Transaction, Box<dyn std::error::Error>> {
+        // todo use Database#transact for retry stategy + timeouts
         self.db.create_trx().map_err(Into::into)
     }
 }
@@ -64,78 +67,139 @@ impl FdbService for FdbServer {
 
         let tx = client.begin_tx().await.expect("unable to begin tx");
 
-        let mut commit = false;
-
         let output = async_stream::try_stream! {
             while let Some(req) = stream.next().await {
-                if commit {
-                    break;
-                }
-
                 count += 1;
 
                 let req = req?;
 
-                let operation  = match req.operation {
+                let operation = match req.operation {
                     Some(operation) => Ok(operation),
                     None => Err(Status::invalid_argument("Missing operation")),
                 }?;
 
-                println!("{} {:?}", count, operation);
+                debug!("{} {:?}", count, operation);
 
-                let res = match operation {
-                    RequestOperation::Get(get) => {
-                        let key = get.key;
-
-                        let opt_val = tx.get(key.as_bytes(), false).await.expect("getting key");
-                        let val = match opt_val {
-                            Some(val) => (*val).to_vec(),
-                            None => vec![],
-                        };
-
-                        let mut res = OperationResponse::default();
-                        let res_op = ResponseOperation::Get(GetResponse {
-                            value: val,
-                        });
-                        res.operation = Some(res_op);
-
-                        Ok(res)
-                    },
-                    RequestOperation::Set(set) => {
-                        let key = set.key;
-                        let value = set.value;
-
-                        tx.set(key.as_bytes(), &value);
-
-                        Ok(OperationResponse::default())
-                    },
-                    RequestOperation::Commit(_) => {
-                        commit = true;
-
-                        Ok(OperationResponse::default())
-                    }
-                    _ => Err(Status::invalid_argument("Unknown operation")),
-                }?;
-
-                if commit {
+                if let RequestOperation::Commit(_) = operation {
                     tx.commit().await.expect("commit failed");
-                    yield res;
+                    yield OperationResponse{
+                        operation: Some(ResponseOperation::Commit(CommitResponse{
+                            ..Default::default()
+                        })),
+                        ..Default::default()
+                    };
                     break;
                 }
+
+                let res = handle_op(&tx, operation).await?;
 
                 yield res;
             }
         };
 
-        println!("HERE");
-
         Ok(Response::new(Box::pin(output) as Self::TransactionStream))
+    }
+}
+
+async fn handle_op(
+    tx: &Transaction,
+    operation: RequestOperation,
+) -> Result<OperationResponse, tonic::Status> {
+    match operation {
+        RequestOperation::Get(get) => {
+            let key = get.key;
+
+            let opt_val = tx.get(&key, false).await.expect("getting key");
+            let val = match opt_val {
+                Some(val) => (*val).to_vec(),
+                None => return Err(Status::not_found("key not found")),
+            };
+
+            Ok(OperationResponse {
+                operation: Some(ResponseOperation::Get(GetResponse {
+                    value: val,
+                    ..Default::default()
+                })),
+                ..Default::default()
+            })
+        }
+        RequestOperation::GetRange(range) => {
+            let limit = if range.limit == 0 {
+                None
+            } else {
+                Some(range.limit as usize)
+            };
+
+            let mut kvs = tx.get_ranges(
+                RangeOption {
+                    limit: limit,
+                    reverse: range.reverse,
+                    ..RangeOption::from((range.start_key, range.end_key))
+                },
+                false,
+            );
+
+            let mut pairs = vec![];
+
+            while let Some(kv) = kvs.next().await {
+                let kv = match kv {
+                    Ok(kv) => kv,
+                    Err(e) => return Err(Status::internal(e.to_string())),
+                };
+
+                // todo yield each set of values instead of grouping them into a single response
+
+                for value in (*kv).into_iter() {
+                    let k = value.key();
+                    let v = value.value();
+
+                    pairs.push(GetRangePair {
+                        key: k.to_vec(),
+                        value: v.to_vec(),
+                    });
+                }
+            }
+
+            Ok(OperationResponse {
+                operation: Some(ResponseOperation::GetRange(GetRangeResponse {
+                    pairs: pairs,
+                    ..Default::default()
+                })),
+                ..Default::default()
+            })
+        }
+        RequestOperation::Set(set) => {
+            let key = set.key;
+            let value = set.value;
+
+            tx.set(&key, &value);
+
+            Ok(OperationResponse {
+                operation: Some(ResponseOperation::Set(SetResponse {
+                    ..Default::default()
+                })),
+                ..Default::default()
+            })
+        }
+        RequestOperation::Clear(clear) => {
+            let key = clear.key;
+
+            tx.clear(&key);
+
+            Ok(OperationResponse {
+                operation: Some(ResponseOperation::Clear(ClearResponse {
+                    ..Default::default()
+                })),
+                ..Default::default()
+            })
+        }
+        _ => Err(Status::invalid_argument("Unknown operation")),
     }
 }
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    println!("Hello, world!");
+    tracing_subscriber::fmt::init();
 
     // guard has to be in scope so it is dropped on shutdown
     #[allow(unused)]
@@ -145,7 +209,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let addr = "0.0.0.0:50051".parse()?;
 
-    let server = FdbServer { client: Arc::new(fdb_client) };
+    let server = FdbServer {
+        client: Arc::new(fdb_client),
+    };
 
     Server::builder()
         .add_service(FdbServiceServer::new(server))
