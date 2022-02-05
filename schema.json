@@ -1,0 +1,34 @@
+{
+  "version": 1,
+  "namespace": "api",
+  "resources": [
+    {
+      "type": "protobuf",
+      "name": "myproto",
+      "location": "/protos.proto"
+    }
+  ],
+  "tables": [
+    {
+      "type": "protobuf",
+      "resource": "myproto",
+      "proto": "protos.Foo",
+      "indexes": [
+        {
+          "type": "value",
+          "keys": [
+            "foo_id"
+          ]
+        },
+        {
+          "type": "alias",
+          "keys": [
+            "bar",
+            "baz",
+            "foo_id"
+          ]
+        }
+      ]
+    }
+  ]
+}
