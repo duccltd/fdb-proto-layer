@@ -13,6 +13,11 @@ message OperationRequest {
         GetRangeRequest get_range = 3;
         SetRequest set = 4;
         ClearRequest clear = 5;
+
+        GetProtoRequest get_proto = 6;
+        GetRangeProtoRequest get_range_proto = 7;
+        SetProtoRequest set_proto = 8;
+        ClearProtoRequest clear_proto = 9;
     }
 }
 
@@ -23,6 +28,11 @@ message OperationResponse {
         GetRangeResponse get_range = 3;
         SetResponse set = 4;
         ClearResponse clear = 5;
+
+        GetProtoResponse get_proto = 6;
+        GetRangeProtoResponse get_range_proto = 7;
+        SetProtoResponse set_proto = 8;
+        ClearProtoResponse clear_proto = 9;
     }
 }
 
@@ -64,4 +74,47 @@ message ClearRequest {
     bytes key = 1;
 }
 message ClearResponse {
+}
+
+message GetProtoRequest {
+    message Key {
+        string name = 1;
+        bytes value = 2;
+    }
+
+    string name = 1;
+    repeated Key keys = 2;
+}
+message GetProtoResponse {
+    bytes value = 1;
+}
+
+message GetRangeProtoRequest {
+    message Key {
+        string name = 1;
+        bytes value = 2;
+    }
+
+    string name = 1;
+    repeated Key start_key = 2;
+    repeated Key end_key = 3;
+    int32 limit = 4;
+    bool reverse = 5;
+}
+message GetRangeProtoResponse {
+    repeated bytes values = 1;
+}
+
+message SetProtoRequest {
+    string name = 1;
+    bytes value = 2;
+}
+message SetProtoResponse {
+}
+
+message ClearProtoRequest {
+    string name = 1;
+    bytes value = 2;
+}
+message ClearProtoResponse {
 }

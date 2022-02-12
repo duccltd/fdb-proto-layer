@@ -3,7 +3,7 @@ use protos::get_range_response::Pair as GetRangePair;
 use protos::operation_request::Operation as RequestOperation;
 use protos::operation_response::Operation as ResponseOperation;
 use protos::{
-    CommitRequest, GetRangeRequest, GetRequest, OperationRequest, OperationResponse, SetRequest,
+    CommitRequest, GetRangeRequest, GetRequest, SetProtoRequest, GetProtoRequest, GetProtoResponse, OperationRequest, OperationResponse, SetRequest,
 };
 
 pub mod protos {
@@ -51,6 +51,29 @@ impl Transaction {
             match message.operation {
                 Some(ResponseOperation::Get(get)) => {
                     return Ok(Some(get.value));
+                }
+                _ => return Err("Expected get response".into()),
+            }
+        }
+
+        Ok(None)
+    }
+
+    pub async fn get_proto(&mut self, name: impl Into<String>, keys: KeySet) -> Result<Option<Vec<u8>>, Box<dyn std::error::Error>> {
+        self.sender.unbounded_send(OperationRequest {
+            operation: Some(RequestOperation::GetProto(GetProtoRequest {
+                name: name.into(),
+                keys: keys.keys,
+                ..Default::default()
+            })),
+            ..Default::default()
+        })?;
+
+        // todo timeouts
+        if let Some(message) = self.stream.message().await.expect("getting next message") {
+            match message.operation {
+                Some(ResponseOperation::GetProto(get_proto)) => {
+                    return Ok(Some(get_proto.value));
                 }
                 _ => return Err("Expected get response".into()),
             }
@@ -119,6 +142,33 @@ impl Transaction {
         Ok(())
     }
 
+    pub async fn set_proto(
+        &mut self,
+        name: impl Into<String>,
+        value: &[u8],
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        self.sender.unbounded_send(OperationRequest {
+            operation: Some(RequestOperation::SetProto(SetProtoRequest {
+                name: name.into(),
+                value: value.to_vec(),
+                ..Default::default()
+            })),
+            ..Default::default()
+        })?;
+
+        // todo timeouts
+        if let Some(message) = self.stream.message().await.expect("getting next message") {
+            match message.operation {
+                Some(ResponseOperation::SetProto(_)) => {
+                    return Ok(());
+                }
+                _ => return Err("Expected set response".into()),
+            }
+        }
+
+        Ok(())
+    }
+
     pub async fn commit(&mut self) -> Result<(), Box<dyn std::error::Error>> {
         self.sender.unbounded_send(OperationRequest {
             operation: Some(RequestOperation::Commit(CommitRequest {})),
@@ -140,6 +190,25 @@ impl Transaction {
 
 #[derive(Default)]
 pub struct GetRangeOpts {
-    reverse: Option<bool>,
-    limit: Option<i32>,
+    pub reverse: Option<bool>,
+    pub limit: Option<i32>,
+}
+
+#[derive(Default)]
+pub struct KeySet {
+    keys: Vec<protos::get_proto_request::Key>,
+}
+
+impl KeySet {
+    pub fn builder() -> KeySet {
+        Default::default()
+    }
+
+    pub fn key(mut self, name: impl Into<String>, value: impl Into<Vec<u8>>) -> Self {
+        self.keys.push(protos::get_proto_request::Key { name: name.into(), value: value.into() });
+        
+        Self {
+            ..self
+        }
+    }
 }

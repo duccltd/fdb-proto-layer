@@ -1,0 +1,9 @@
+syntax = "proto3";
+
+package protos;
+
+message Foo {
+    string foo_id = 1;
+    string bar = 2;
+    string baz = 3;
+}
